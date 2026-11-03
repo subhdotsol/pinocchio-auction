@@ -1,0 +1,22 @@
+[package]
+name = "counter-client"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Own workspace = own Cargo.lock, so the client can use the newest Agave RPC crates
+# while tests/ stays on the versions LiteSVM supports.
+[workspace]
+
+[dependencies]
+solana-rpc-client = "4.4"
+solana-rpc-client-api = "4.4"
+# Same versions solana-rpc-client 4.4 uses (check with `cargo tree --depth 1 -p solana-rpc-client`).
+solana-message = "5.1"         # v1::Message, v1::TransactionConfig, VersionedMessage::V1
+solana-transaction = "5.1"     # VersionedTransaction
+solana-instruction = "4.0"
+solana-pubkey = { version = "4.4", features = ["curve25519"] }
+solana-keypair = "4.0"
+solana-signer = "4.0"
+solana-commitment-config = "3.1"
+anyhow = "1"

@@ -8,6 +8,10 @@ pub enum CounterError {
     Unauthorized = 0,
     /// `count` would exceed `u64::MAX`.
     Overflow = 1,
+    /// Vault is not an SPL Token account owned by the counter PDA.
+    InvalidVault = 2,
+    /// Deposit amount is zero.
+    ZeroAmount = 3,
 }
 
 impl From<CounterError> for ProgramError {

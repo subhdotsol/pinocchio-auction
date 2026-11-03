@@ -11,17 +11,26 @@ from-scratch setup, version reasoning, and troubleshooting.
 | | |
 |---|---|
 | Program ID | [`LmGSyCLnSD14kNmpgvsHzM2fN6dxQ8eUyoVhPtw4Ff2`](https://explorer.solana.com/address/LmGSyCLnSD14kNmpgvsHzM2fN6dxQ8eUyoVhPtw4Ff2?cluster=devnet) |
-| Binary | 8,936 bytes, SBPF v3 (`0300 0000` at `0x30`), identical to `target/deploy/auction.so` |
+| Binary | 8,936 bytes, SBPF v3 (`0300 0000` at `0x30`). Built before `Deposit`/`Withdraw` were added; redeploy to get them |
 | Upgrade authority | `5GHnVhqZ6Yn8mQmM43CwMRTNWZofeyExMkP6PDGCAc9d` |
 
 ## Program
 
-Counter PDA seeds: `["counter", authority]`.
+Counter PDA seeds: `["counter", authority]`. The vault is any SPL Token account whose owner is
+the counter PDA (for example the PDA's ATA); the client creates it.
 
-| Discriminator | Instruction | Accounts |
-|---|---|---|
-| `0` | `Initialize` | `[signer, writable] authority`, `[writable] counter PDA`, `[] system program` |
-| `1` | `Increment` | `[signer] authority`, `[writable] counter PDA` |
+Instruction data is `[discriminator, args...]`. Each processor in `program/src/instructions/`
+documents its accounts, arguments, and errors.
+
+| Discriminator | Instruction | Args | Accounts |
+|---|---|---|---|
+| `0` | `Initialize` | none | `[signer, writable] authority`, `[writable] counter PDA`, `[] system program` |
+| `1` | `Increment` | none | `[signer] authority`, `[writable] counter PDA` |
+| `2` | `Deposit` | `amount: u64` LE | `[signer] depositor`, `[writable] source`, `[] counter`, `[writable] vault`, `[] token program` |
+| `3` | `Withdraw` | none | `[signer, writable] authority`, `[] counter`, `[writable] vault`, `[writable] destination`, `[] token program` |
+
+`Withdraw` signs as the counter PDA to transfer the whole vault balance to `destination`, then
+closes the vault and returns its rent to the authority.
 
 Counter account (48 bytes, alignment 1):
 
@@ -39,6 +48,8 @@ Errors (`custom program error: 0x<code>`):
 |---|---|---|
 | `0x0` | `Unauthorized` | Signer is not the counter's authority |
 | `0x1` | `Overflow` | `count` would exceed `u64::MAX` |
+| `0x2` | `InvalidVault` | Vault is not an SPL Token account owned by the counter PDA |
+| `0x3` | `ZeroAmount` | Deposit amount is 0 |
 
 ## Layout
 
@@ -83,8 +94,11 @@ xxd -s 0x30 -l 4 target/deploy/auction.so   # 0300 0000 = v3
 cd tests && cargo test
 ```
 
-7 tests run the `.so` with v1 transactions: initialize, double initialize, foreign PDA, increment,
-unauthorized increment, overflow, and the v1 compute-unit limit.
+12 tests run the `.so` with v1 transactions: initialize, double initialize, foreign PDA, increment,
+unauthorized increment, overflow, the v1 compute-unit limit, deposit, deposit into a vault the
+counter doesn't own, zero deposit, withdraw (tokens out, vault closed, rent returned), and
+unauthorized withdraw. Token transactions load the SPL Token program (~131 KB), so they use a
+256 KiB loaded-accounts limit instead of 64 KiB.
 
 ## Run locally (surfpool)
 

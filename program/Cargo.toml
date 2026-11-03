@@ -12,6 +12,8 @@ crate-type = ["cdylib"]
 # No default features: no heap allocator (`alloc`), no `copy` derives. `cpi` gives Seed/Signer.
 pinocchio = { version = "0.12", default-features = false, features = ["cpi"] }
 pinocchio-system = "0.7"
+# SPL Token CPI helpers (Transfer, CloseAccount) and the token-account reader. No `alloc`.
+pinocchio-token = "0.8"
 solana-program-log = "1.2"
 
 # Host builds only (rust-analyzer, `cargo check`, unit tests): `Address::find_program_address`

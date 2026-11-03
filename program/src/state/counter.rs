@@ -36,6 +36,16 @@ impl Counter {
         self.count = count.to_le_bytes();
     }
 
+    /// Read-only view. Checks length and discriminator. The caller must check the account owner
+    /// first.
+    pub fn from_bytes(data: &[u8]) -> Result<&Self, ProgramError> {
+        if data.len() != Self::LEN || data[0] != Self::DISCRIMINATOR {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        // SAFETY: length checked; alignment is 1.
+        Ok(unsafe { &*(data.as_ptr() as *const Self) })
+    }
+
     /// Checks length and discriminator. The caller must check the account owner first.
     pub fn from_bytes_mut(data: &mut [u8]) -> Result<&mut Self, ProgramError> {
         if data.len() != Self::LEN || data[0] != Self::DISCRIMINATOR {

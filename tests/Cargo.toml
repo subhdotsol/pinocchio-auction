@@ -9,6 +9,8 @@ publish = false
 
 [dev-dependencies]
 litesvm = "0.18.1"
+# Real mint / ATA / MintTo setup. Same release line as litesvm, so the types match.
+litesvm-token = "0.18.1"
 # Not used directly. litesvm 0.18.1 is built against Agave 4.3 and does not compile against 4.4;
 # Agave crates pin each other with `=`, so `~4.3` holds the whole family at 4.3.x.
 solana-program-runtime = "~4.3"

@@ -6,12 +6,42 @@ use pinocchio::{
 use pinocchio_system::instructions::CreateAccount;
 use solana_program_log::log;
 
-use crate::{error::CounterError, state::COUNTER_SEED, state::Counter};
+use crate::state::{COUNTER_SEED, Counter};
 
-pub const INITIALIZE: u8 = 0;
-pub const INCREMENT: u8 = 1;
-
-pub fn initialize(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
+/// # Initialize (discriminator `0`)
+///
+/// Creates the authority's counter PDA with `count = 0`.
+///
+/// ## Business logic
+/// 1. The authority signs and pays rent for the new account.
+/// 2. The program derives the canonical bump itself; a bump sent by the client is never trusted.
+/// 3. The counter is created through a signed System Program CPI, so only this program can
+///    create an account at that address.
+/// 4. One counter per authority: a second `Initialize` fails.
+///
+/// ## Accounts
+/// 0. `[signer, writable]` authority - pays rent and becomes the counter's authority
+/// 1. `[writable]` counter - PDA `["counter", authority]`, must not exist yet
+/// 2. `[]` system_program - System Program
+///
+/// ## Instruction data (after the discriminator)
+/// None. Any extra bytes return `InvalidInstructionData`.
+///
+/// ## Errors
+/// - `NotEnoughAccountKeys`: fewer than 3 accounts
+/// - `InvalidInstructionData`: extra bytes after the discriminator
+/// - `MissingRequiredSignature`: authority did not sign
+/// - `IncorrectProgramId`: account 2 is not the System Program
+/// - `AccountAlreadyInitialized`: counter is already owned by this program
+/// - `InvalidSeeds`: counter is not the canonical PDA for this authority
+pub fn initialize(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+) -> ProgramResult {
+    if !data.is_empty() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
     let [authority, counter, system_program, ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -49,28 +79,5 @@ pub fn initialize(program_id: &Address, accounts: &mut [AccountView]) -> Program
     state.set_count(0);
 
     log!("counter initialized");
-    Ok(())
-}
-
-pub fn increment(program_id: &Address, accounts: &mut [AccountView]) -> ProgramResult {
-    let [authority, counter, ..] = accounts else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-    if !authority.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-    if !counter.owned_by(program_id) {
-        return Err(ProgramError::InvalidAccountOwner);
-    }
-
-    let mut data = counter.try_borrow_mut()?;
-    let state = Counter::from_bytes_mut(&mut data)?;
-    if &state.authority != authority.address() {
-        return Err(CounterError::Unauthorized.into());
-    }
-    let count = state.count().checked_add(1).ok_or(CounterError::Overflow)?;
-    state.set_count(count);
-
-    log!("count = {}", count);
     Ok(())
 }

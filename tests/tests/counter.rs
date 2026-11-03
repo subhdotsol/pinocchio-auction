@@ -1,7 +1,11 @@
-//! Runs `../target/deploy/pinocchio_counter.so` in LiteSVM with v1 transactions.
+//! Runs `../target/deploy/auction.so` in LiteSVM with v1 transactions.
 //! Build it first: `cargo build-sbf --tools-version v1.58 --arch v3` from the project root.
 
 use litesvm::LiteSVM;
+use litesvm_token::{
+    get_spl_account, spl_token::state::Account as TokenAccount, CreateAssociatedTokenAccount,
+    CreateMint, MintTo, TOKEN_ID,
+};
 use solana_account::Account;
 use solana_address::Address;
 use solana_instruction::{AccountMeta, Instruction};
@@ -13,12 +17,18 @@ use solana_transaction::{versioned::VersionedTransaction, InstructionError, Tran
 const PROGRAM_SO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../target/deploy/auction.so");
 const SYSTEM_PROGRAM: Address = Address::new_from_array([0; 32]);
 const COUNTER_LEN: usize = 48;
+// LiteSVM's mainnet feature set includes SIMD-0266, so this address runs p-token.
+const TOKEN_PROGRAM: Address = TOKEN_ID;
 
 // Unset v1 limits are ZERO, not runtime defaults: always set the CU and loaded-data limits.
 const CONFIG: v1::TransactionConfig = v1::TransactionConfig::empty()
     .with_compute_unit_limit(20_000)
     .with_loaded_accounts_data_size_limit(64 * 1024)
     .with_priority_fee(1_000);
+// Token instructions also load the token program (p-token, ~100 KB), which counts toward the limit.
+const TOKEN_CONFIG: v1::TransactionConfig = CONFIG
+    .with_compute_unit_limit(50_000)
+    .with_loaded_accounts_data_size_limit(256 * 1024);
 
 struct Ctx {
     svm: LiteSVM,
@@ -108,6 +118,109 @@ fn initialized() -> (Ctx, Address) {
 
 fn custom(code: u32) -> TransactionError {
     TransactionError::InstructionError(0, InstructionError::Custom(code))
+}
+
+fn token_amount(svm: &LiteSVM, address: &Address) -> u64 {
+    get_spl_account::<TokenAccount>(svm, address).unwrap().amount
+}
+
+fn lamports(svm: &LiteSVM, address: &Address) -> u64 {
+    svm.get_account(address).map_or(0, |a| a.lamports)
+}
+
+fn deposit_ix(
+    program_id: Address,
+    depositor: Address,
+    source: Address,
+    counter: Address,
+    vault: Address,
+    amount: u64,
+) -> Instruction {
+    let mut data = vec![2];
+    data.extend_from_slice(&amount.to_le_bytes());
+    Instruction::new_with_bytes(
+        program_id,
+        &data,
+        vec![
+            AccountMeta::new_readonly(depositor, true),
+            AccountMeta::new(source, false),
+            AccountMeta::new_readonly(counter, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+        ],
+    )
+}
+
+fn withdraw_ix(
+    program_id: Address,
+    authority: Address,
+    counter: Address,
+    vault: Address,
+    destination: Address,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        program_id,
+        &[3],
+        vec![
+            AccountMeta::new(authority, true),
+            AccountMeta::new_readonly(counter, false),
+            AccountMeta::new(vault, false),
+            AccountMeta::new(destination, false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM, false),
+        ],
+    )
+}
+
+/// Real accounts created through the Token and Associated Token Account programs.
+struct Tokens {
+    mint: Address,
+    /// Authority's ATA, starts with 100.
+    source: Address,
+    /// The counter PDA's ATA, starts empty.
+    vault: Address,
+}
+
+fn with_vault() -> (Ctx, Address, Tokens) {
+    let (mut ctx, counter) = initialized();
+    let mint = CreateMint::new(&mut ctx.svm, &ctx.authority)
+        .decimals(6)
+        .send()
+        .unwrap();
+    let source = CreateAssociatedTokenAccount::new(&mut ctx.svm, &ctx.authority, &mint)
+        .send()
+        .unwrap();
+    // The ATA program accepts an off-curve owner, so a PDA can have an ATA.
+    let vault = CreateAssociatedTokenAccount::new(&mut ctx.svm, &ctx.authority, &mint)
+        .owner(&counter)
+        .send()
+        .unwrap();
+    MintTo::new(&mut ctx.svm, &ctx.authority, &mint, &source, 100)
+        .send()
+        .unwrap();
+    (ctx, counter, Tokens { mint, source, vault })
+}
+
+fn deposit(
+    ctx: &mut Ctx,
+    counter: Address,
+    tokens: &Tokens,
+    amount: u64,
+) -> Result<(), TransactionError> {
+    let ix = deposit_ix(
+        ctx.program_id,
+        ctx.authority.pubkey(),
+        tokens.source,
+        counter,
+        tokens.vault,
+        amount,
+    );
+    send(
+        &mut ctx.svm,
+        ix,
+        &ctx.authority,
+        &[&ctx.authority],
+        TOKEN_CONFIG,
+    )
 }
 
 #[test]
@@ -202,4 +315,84 @@ fn v1_compute_limit_is_enforced() {
         err,
         TransactionError::InstructionError(0, InstructionError::ComputationalBudgetExceeded)
     );
+}
+
+#[test]
+fn deposit_moves_tokens_into_vault() {
+    let (mut ctx, counter, tokens) = with_vault();
+    deposit(&mut ctx, counter, &tokens, 40).unwrap();
+    assert_eq!(token_amount(&ctx.svm, &tokens.vault), 40);
+    assert_eq!(token_amount(&ctx.svm, &tokens.source), 60);
+}
+
+#[test]
+fn deposit_rejects_vault_not_owned_by_counter() {
+    let (mut ctx, counter, mut tokens) = with_vault();
+    // The authority's own ATA, not the counter PDA's.
+    tokens.vault = tokens.source;
+    let err = deposit(&mut ctx, counter, &tokens, 40).unwrap_err();
+    assert_eq!(err, custom(2));
+    assert_eq!(token_amount(&ctx.svm, &tokens.source), 100);
+}
+
+#[test]
+fn deposit_rejects_zero_amount() {
+    let (mut ctx, counter, tokens) = with_vault();
+    let err = deposit(&mut ctx, counter, &tokens, 0).unwrap_err();
+    assert_eq!(err, custom(3));
+}
+
+#[test]
+fn withdraw_empties_and_closes_vault() {
+    let (mut ctx, counter, tokens) = with_vault();
+    deposit(&mut ctx, counter, &tokens, 40).unwrap();
+    let authority = ctx.authority.pubkey();
+    let vault_rent = lamports(&ctx.svm, &tokens.vault);
+    let before = lamports(&ctx.svm, &authority);
+
+    // Back to the authority's own ATA.
+    let ix = withdraw_ix(ctx.program_id, authority, counter, tokens.vault, tokens.source);
+    send(
+        &mut ctx.svm,
+        ix,
+        &ctx.authority,
+        &[&ctx.authority],
+        TOKEN_CONFIG,
+    )
+    .unwrap();
+
+    assert_eq!(token_amount(&ctx.svm, &tokens.source), 100);
+    assert_eq!(lamports(&ctx.svm, &tokens.vault), 0, "vault closed");
+    // Vault rent goes to the authority; 6,000 = 5,000 signature fee + 1,000 priority fee.
+    assert_eq!(lamports(&ctx.svm, &authority), before + vault_rent - 6_000);
+}
+
+#[test]
+fn withdraw_unauthorized() {
+    let (mut ctx, counter, tokens) = with_vault();
+    deposit(&mut ctx, counter, &tokens, 40).unwrap();
+    let intruder = Keypair::new();
+    let intruder_ata = CreateAssociatedTokenAccount::new(&mut ctx.svm, &ctx.authority, &tokens.mint)
+        .owner(&intruder.pubkey())
+        .send()
+        .unwrap();
+
+    let ix = withdraw_ix(
+        ctx.program_id,
+        intruder.pubkey(),
+        counter,
+        tokens.vault,
+        intruder_ata,
+    );
+    // authority pays the fee, intruder signs as `authority`.
+    let err = send(
+        &mut ctx.svm,
+        ix,
+        &ctx.authority,
+        &[&ctx.authority, &intruder],
+        TOKEN_CONFIG,
+    )
+    .unwrap_err();
+    assert_eq!(err, custom(0));
+    assert_eq!(token_amount(&ctx.svm, &tokens.vault), 40);
 }
